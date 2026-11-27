@@ -1,0 +1,64 @@
+name: grh-compact independent build
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+env:
+  PIN: 72fead102f663d5c7a407964a13dc0cf9d977207
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 355
+    steps:
+      - name: Free runner disk
+        run: sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL; df -h /
+      - name: Clone pinned proof
+        run: |
+          git clone https://github.com/lsernau/grh-lean.git
+          git -C grh-lean checkout "$PIN"
+          echo "HEAD $(git -C grh-lean rev-parse HEAD)"
+          cat grh-lean/grh-compact/lean-toolchain
+      - name: Restore partial build (resumes across 6h runs)
+        uses: actions/cache/restore@v4
+        with:
+          path: grh-lean/grh-compact/.lake/build
+          key: grh-compact-build-${{ env.PIN }}-${{ github.run_id }}
+          restore-keys: grh-compact-build-${{ env.PIN }}-
+      - name: Install elan
+        run: |
+          curl -sSfL https://raw.githubusercontent.com/leanprover/elan/master/elan-init.sh | sh -s -- -y --default-toolchain none
+          echo "$HOME/.elan/bin" >> "$GITHUB_PATH"
+      - name: Mathlib cache
+        working-directory: grh-lean/grh-compact
+        run: lake exe cache get
+      - name: Build (stops at 320 min so the cache save still runs)
+        id: build
+        working-directory: grh-lean/grh-compact
+        run: |
+          set +e
+          timeout 320m lake build 2>&1 | tee ../../build.log | grep -E "error|✖|Build completed|warning: declaration uses 'sorry'" | head -200
+          rc=${PIPESTATUS[0]}
+          echo "rc=$rc" | tee -a "$GITHUB_OUTPUT"
+          tail -5 ../../build.log
+          exit $rc
+      - name: Save partial build
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: grh-lean/grh-compact/.lake/build
+          key: grh-compact-build-${{ env.PIN }}-${{ github.run_id }}
+      - name: Axiom audit
+        if: success()
+        working-directory: grh-lean/grh-compact
+        run: lake env lean scripts/PrintAxioms.lean 2>&1 | tee ../../AXIOMS.txt
+      - name: Sorry scan
+        if: always()
+        run: grep -c "declaration uses 'sorry'" build.log || true
+      - name: Upload receipts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: grh-compact-receipts
+          path: |
+            build.log
+            AXIOMS.txt
